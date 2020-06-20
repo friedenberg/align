@@ -2,37 +2,25 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <ctype.h>
 #include <getopt.h>
-
-void remove_trailing_newline(char **);
-char add_trailing_newline(char **);
+#include <unistd.h>
+#include <fcntl.h>
 
 const char FAILURE = -1;
 
-enum trim_result {
-  TRIM_RESULT_FAILED = FAILURE,
-  TRIM_RESULT_SAME,
-  TRIM_RESULT_TRUNC,
-};
-
-typedef enum trim_result TRIM_RESULT;
-
-TRIM_RESULT trim_line(char **, size_t, size_t);
-
-enum pad_result {
-  PAD_RESULT_FAILED = FAILURE,
-  PAD_RESULT_SAME,
-  PAD_RESULT_PADDED,
-};
-
-typedef enum pad_result PAD_RESULT;
-
-PAD_RESULT pad_line(char **, size_t, char *, char *, size_t);
+errno_t strtrunc_s(char **, size_t, size_t, char);
 
 static int opt_debug                = 0;
 static int opt_remove_empty_lines   = 0;
 static int opt_pad_length           = 0;
 static char *opt_pad_string         = " ";
+
+void ldebug(char *str) {
+  if (opt_debug) {
+    printf("%s\n", str);
+  }
+}
 
 void prepare_options(int argc, char **argv) {
   static struct option long_options[] = {
@@ -68,6 +56,10 @@ void prepare_options(int argc, char **argv) {
           opt_pad_string = optarg;
         }
         break;
+
+      default:
+        exit(1);
+        break;
     }
   }
 }
@@ -78,37 +70,40 @@ int main(int argc, char **argv) {
   size_t line_count = 0;
 
   while (1) {
+    if (opt_debug) {
+      printf("for line no %lu\n", line_count);
+    }
+
     char *line = NULL;
     size_t len = 0;
+
+    ldebug("reading");
+
     ssize_t read = getline(&line, &len, stdin);
 
+    if (opt_debug) {
+      printf("read length (with null): %lu\n", len);
+      printf("read length (without null): %lu\n", read);
+      printf("read str: %s\n", line);
+    }
+
     if (opt_remove_empty_lines && read == 1) {
+      ldebug("line was empty, skipping");
+
       free(line);
+      line = NULL;
       continue;
     }
 
-    if (opt_pad_length > 0) {
-      remove_trailing_newline(&line);
-
-      PAD_RESULT pad_result = pad_line(&line, len, NULL, opt_pad_string, opt_pad_length);
-      add_trailing_newline(&line);
-    }
+    errno_t opresult = strtrunc_s(&line, read, opt_pad_length, opt_pad_string[0]);
 
     if (line) {
-      printf("%s", line);
+      printf("%s\n", line);
       free(line);
     }
 
-    if (opt_debug) {
-      printf("len: %lu\n", len);
-      printf("read: %zd\n", read);
-    }
-
-
     if (read == -1) {
-      if (opt_debug) {
-        printf("end of input");
-      }
+      ldebug("end of input");
 
       break;
     } else {
@@ -119,95 +114,65 @@ int main(int argc, char **argv) {
   return 0;
 }
 
-PAD_RESULT pad_line(
-    char **line,
-    size_t length,
-    char *delimiter,
-    char *replacement,
-    size_t pad_length
-    ) {
-  char trim_successs = trim_line(line, length, pad_length);
+errno_t strtrunc_s(char **str, size_t len, size_t trunc_len, char pad_char) {
+  char last_char = (*str)[len - 1];
 
-  switch (trim_successs) {
-    case TRIM_RESULT_SAME:
-      {
-        size_t new_size = strlen(*line) + strlen(replacement);
-        char *new_buffer = realloc(*line, new_size);
-
-        if (new_buffer) {
-          if (new_buffer != *line) {
-            free(*line);
-            *line = new_buffer;
-          }
-
-          strcat(*line, replacement);
-          return PAD_RESULT_PADDED;
-        } else {
-          return PAD_RESULT_FAILED;
-        }
-      }
-      break;
-
-    case TRIM_RESULT_TRUNC:
-      return PAD_RESULT_SAME;
-
-    default:
-      return PAD_RESULT_FAILED;
-  }
-}
-
-TRIM_RESULT trim_line(char **line, size_t current_length, size_t trimmed_length) {
-  if (current_length <= trimmed_length) {
-    return TRIM_RESULT_SAME;
+  if (opt_debug) {
+    printf("beginning truncation for str: \nlength: %lu\ntrunc_len: %lu\nstr: %s", len, trunc_len, *str);
   }
 
-  char *new_line = realloc(*line, trimmed_length + sizeof(char));
+  ldebug("checking for trailing newlines");
+  //remove trailing new lines, if they exist
+  if (last_char == '\n') {
+    ldebug("removing trailing newline");
 
-  if (new_line) {
-    if (new_line != *line) {
-      free(*line);
-      *line = new_line;
-    }
-
-    new_line[trimmed_length] = '\0';
-    return TRIM_RESULT_TRUNC;
-  } else {
-    return TRIM_RESULT_FAILED;
-  }
-}
-
-void remove_trailing_newline(char **str) {
-  if (!*str) {
-    return;
+    len--;
+    (*str)[len] = '\0';
   }
 
-  size_t len = strlen(*str);
-  if (len > 0 && *str[len - 1] == '\n') {
-    *str[--len] = '\0';
-  }
-}
+  ldebug("checking for trunc_length");
 
-char add_trailing_newline(char **str) {
-  if (!*str) {
+  if (trunc_len == 0) {
     return 0;
   }
 
-  size_t len = strlen(*str);
+  ldebug("reallocating");
 
-  if (len > 0) {
-    char *new_line = "\n";
-    char *new_buf = realloc(*str, len + strlen(new_line));
+  char *new_str = realloc(*str, trunc_len * sizeof(char));
 
-    if (new_buf) {
-      if (new_buf != *str) {
-        free(*str);
-        *str = new_buf;
+  //we couldn't reallocate memory so bye girl bye
+  if (new_str == NULL) {
+    ldebug("unable to reallocate memory");
+    return -1;
+  }
+
+  ldebug("comparing strings");
+
+  if (new_str != *str) {
+    free(*str);
+    *str = new_str;
+  }
+
+  (*str)[trunc_len] = '\0';
+
+  ldebug("checking for length less than trunc_length");
+
+  if (len < trunc_len) {
+    ldebug("length less than trunc_length, not modifying");
+
+    for (size_t i = len; i < trunc_len; i++) {
+      (*str)[i] = pad_char;
+    }
+
+    (*str)[trunc_len] = '\0';
+  } else {
+    ldebug("searching end for spaces");
+    for (size_t i = trunc_len; i > 0; i--) {
+      if (isspace((*str)[i])) {
+        (*str)[i] = pad_char;
+      } else {
+        break;
       }
-
-      strcat(*str, new_line);
-      return 0;
-    } else {
-      return FAILURE;
     }
   }
 
